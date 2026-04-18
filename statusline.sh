@@ -14,11 +14,18 @@ eval "$(echo "$input" | jq -r '
   @sh "seven_d_reset=\(.rate_limits.seven_day.resets_at // "")"
 ' 2>/dev/null)"
 
+# Effort level (not in statusline JSON — read from settings.json)
+effort=$(jq -r '.effortLevel // empty' ~/.claude/settings.json 2>/dev/null)
+
 # Shorten model name
 case "$model" in
-  *Opus*4.6*)   model="Opus 4.6 (1M)" ;;
-  *Sonnet*4.6*) model="Sonnet 4.6" ;;
-  *Haiku*4.5*)  model="Haiku 4.5" ;;
+  *Opus*4.7*1[Mm]*) model="Opus 4.7 (1M)" ;;
+  *Opus*4.7*)       model="Opus 4.7" ;;
+  *Opus*4.6*1[Mm]*) model="Opus 4.6 (1M)" ;;
+  *Opus*4.6*)       model="Opus 4.6" ;;
+  *Sonnet*4.6*1[Mm]*) model="Sonnet 4.6 (1M)" ;;
+  *Sonnet*4.6*)       model="Sonnet 4.6" ;;
+  *Haiku*4.5*)      model="Haiku 4.5" ;;
 esac
 
 # Context color (aggressive thresholds — never want to exceed 20%)
@@ -73,7 +80,9 @@ rate_limit_display() {
     local color=$(color_for_pace "$delta")
     local remaining=$(hours_until "$reset_epoch")
     printf "%s" "${color}${label}:${usage_int}%${RST}"
-    [ -n "$remaining" ] && printf "%s" "\033[90m -${remaining}${RST}"
+    if [ -n "$remaining" ] && [ "$delta" -ge 11 ] 2>/dev/null; then
+      printf "%s" "\033[90m -${remaining}${RST}"
+    fi
   else
     printf "%s" "\033[32m${label}:${usage_int}%${RST}"
   fi
@@ -105,6 +114,7 @@ parts="$parts | $ctx_display"
 parts="$parts | $limit_5h"
 parts="$parts | $limit_7d"
 parts="$parts | \033[90m${model:-}${RST}"
+[ -n "$effort" ] && parts="$parts | \033[90mE:${effort}${RST}"
 parts="$parts | \033[90m\$$([ -n "$cost" ] && printf '%.2f' "$cost")${RST}"
 
 # Active agents

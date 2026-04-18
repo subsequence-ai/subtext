@@ -9,7 +9,7 @@ A status line for [Claude Code](https://claude.ai/code) built for **Substrate** 
 Subtext shows you what actually matters: context health, rate limit pacing, and active agents — all from data Claude Code already provides. No API calls, no tokens spent, no external dependencies beyond `jq`.
 
 ```
-<𝕊> | CTX:8% | 5h:24% -3h | 7d:55% -120h | Opus 4.6 (1M) | $0.12
+<𝕊> | CTX:8% | 5h:24% | 7d:55% -120h | Opus 4.7 (1M) | E:xhigh | $0.12
 ```
 
 > **What is Substrate?** A curated layer of configs, hooks, skills, and workflows that sits on top of Claude Code — turning it from a general-purpose coding assistant into a structured development environment. Subtext works standalone with any Claude Code setup, but it was designed as part of that system.
@@ -19,13 +19,14 @@ Subtext shows you what actually matters: context health, rate limit pacing, and 
 | Segment | Example | Description |
 |---------|---------|-------------|
 | Context | `CTX:8%` | Context window usage (bold, color-coded) |
-| 5h limit | `5h:24% -3h` | 5-hour rate limit usage + hours until reset |
-| 7d limit | `7d:55% -120h` | 7-day rate limit usage + hours until reset |
-| Model | `Opus 4.6 (1M)` | Active model |
+| 5h limit | `5h:24%` / `5h:24% -3h` | 5-hour rate limit usage. Hours until reset appear only when pace is outside green |
+| 7d limit | `7d:55%` / `7d:55% -120h` | 7-day rate limit usage. Hours until reset appear only when pace is outside green |
+| Model | `Opus 4.7 (1M)` | Active model |
+| Effort | `E:xhigh` | Current `effortLevel` (read from `~/.claude/settings.json`) — omitted if unset |
 | Cost | `$0.12` | Session cost (at API pricing) |
 | Agents | `agents(3): alpha, beta, general-purpose` | Active subagents in current session (only appears when agents are running) |
 
-All segments are always visible. Before data is available (e.g., rate limits before the first API response), the label renders with an empty value — the layout stays stable as data fills in.
+Core segments (context, rate limits, model, cost) are always visible. Before data is available (e.g., rate limits before the first API response), the label renders with an empty value — the layout stays stable as data fills in. The hours-until-reset, effort, and agents segments are conditional and disappear when not relevant, reducing visual noise.
 
 **A note on cost:** Your Pro/Max subscription covers your usage — the cost displayed isn't what you're being charged. It's what the session *would* cost at API pricing. It's worth paying attention to: our tokens are subsidized today, but that won't last forever. Building awareness of what your usage actually costs helps you make better decisions about how you work.
 
@@ -67,10 +68,12 @@ Claude Code pipes a JSON object to your statusline script via stdin on every ass
 Subtext extracts all fields in a single `jq` call for performance, then assembles them in display order:
 
 ```
-context | 5h limit | 7d limit | model | cost
+context | 5h limit | 7d limit | model | effort | cost
 ```
 
 The rate limit fields (`rate_limits.five_hour`, `rate_limits.seven_day`) are provided natively by Claude Code for Pro/Max subscribers. No OAuth tokens or API calls needed.
+
+The effort level is the one exception: Claude Code doesn't expose it in the statusline JSON, so Subtext reads `effortLevel` directly from `~/.claude/settings.json`. This reflects the setting that `/effort` writes, so live changes update on the next status refresh.
 
 ## Color logic
 
@@ -140,7 +143,7 @@ pace_delta = usage% - elapsed%
 | Orange | 21–35 | Moderately ahead — consider slowing down |
 | Red | 35+ | Well ahead of pace — you'll hit the limit before reset |
 
-The hours-until-reset display (e.g., `-3h`) rounds to the nearest hour so you can quickly gauge how much runway you have.
+The hours-until-reset display (e.g., `-3h`) rounds to the nearest hour so you can quickly gauge how much runway you have. It's hidden while you're in the green zone — when you're on pace, the countdown is just noise. It reappears automatically the moment your pace pushes into yellow, orange, or red.
 
 ## Agent tracking
 
@@ -152,12 +155,13 @@ When no agents are running, the segment disappears.
 
 ## Customization
 
-The script is ~110 lines of bash. Everything is straightforward to modify:
+The script is ~130 lines of bash. Everything is straightforward to modify:
 
 - **Colors**: Adjust thresholds in `color_for_ctx()` or `color_for_pace()`
-- **Layout order**: Reorder the assembly lines (96–101) to rearrange segments
-- **Model names**: Add patterns to the `case` block (lines 18–22)
-- **Dimming**: The model and cost use `\033[90m` (bright black/gray) — change to any ANSI code
+- **Layout order**: Reorder the assembly lines in the `# Assemble` block to rearrange segments
+- **Model names**: Add patterns to the `case` block under `# Shorten model name`
+- **Hours visibility**: The `[ "$delta" -ge 11 ]` check in `rate_limit_display()` controls when the hours-until-reset text appears — adjust or remove to always show
+- **Dimming**: The model, effort, and cost use `\033[90m` (bright black/gray) — change to any ANSI code
 
 ## Requirements
 
