@@ -8,6 +8,7 @@ eval "$(echo "$input" | jq -r '
   @sh "used_pct=\(.context_window.used_percentage // "")",
   @sh "cost=\(.cost.total_cost_usd // "")",
   @sh "session_id=\(.session_id // "")",
+  @sh "cwd=\(.workspace.current_dir // "")",
   @sh "five_h=\(.rate_limits.five_hour.used_percentage // "")",
   @sh "five_h_reset=\(.rate_limits.five_hour.resets_at // "")",
   @sh "seven_d=\(.rate_limits.seven_day.used_percentage // "")",
@@ -115,7 +116,6 @@ parts="$parts | $limit_5h"
 parts="$parts | $limit_7d"
 parts="$parts | \033[90m${model:-}${RST}"
 [ -n "$effort" ] && parts="$parts | \033[90mE:${effort}${RST}"
-parts="$parts | \033[90m\$$([ -n "$cost" ] && printf '%.2f' "$cost")${RST}"
 
 # Active agents
 if [ -f "$TRACK_FILE" ]; then
@@ -125,5 +125,62 @@ if [ -f "$TRACK_FILE" ]; then
   ' "$TRACK_FILE" 2>/dev/null)
   [ -n "$agent_info" ] && parts="$parts | agents(${agent_info%%:*}): ${agent_info#*:}"
 fi
+
+# ── Second line: branch | timer | price | task ───────────────────────────────
+line2_segments=()
+
+# Git branch (+ dirty indicator)
+if [ -n "$cwd" ] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+  branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
+  if [ -n "$branch" ]; then
+    dirty=""
+    [ -n "$(git -C "$cwd" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] && dirty="*"
+    line2_segments+=("\033[90m${branch}${dirty}${RST}")
+  fi
+fi
+
+# Session timer (duration since session file was created)
+if [ -n "$session_id" ] && [ -n "$cwd" ]; then
+  encoded=$(printf '%s' "$cwd" | tr '/_.' '---')
+  session_file="$HOME/.claude/projects/${encoded}/${session_id}.jsonl"
+  if [ -f "$session_file" ]; then
+    birth=$(stat -f %B "$session_file" 2>/dev/null)
+    if [ -n "$birth" ] && [ "$birth" -gt 0 ] 2>/dev/null; then
+      elapsed=$(( now_epoch - birth ))
+      [ "$elapsed" -lt 0 ] && elapsed=0
+      if [ "$elapsed" -lt 3600 ]; then
+        timer="$(( elapsed / 60 ))m"
+      else
+        timer="$(( elapsed / 3600 ))h$(( (elapsed % 3600) / 60 ))m"
+      fi
+      line2_segments+=("\033[90m${timer}${RST}")
+    fi
+  fi
+fi
+
+# Price
+line2_segments+=("\033[90m\$$([ -n "$cost" ] && printf '%.2f' "$cost")${RST}")
+
+# Task (completed / total) from tasks.md in cwd
+if [ -n "$cwd" ] && [ -f "$cwd/tasks.md" ]; then
+  done_count=$(grep -cE '^[[:space:]]*-[[:space:]]+\[[xX]\]' "$cwd/tasks.md" 2>/dev/null)
+  todo_count=$(grep -cE '^[[:space:]]*-[[:space:]]+\[[[:space:]]\]' "$cwd/tasks.md" 2>/dev/null)
+  total=$(( done_count + todo_count ))
+  if [ "$total" -gt 0 ]; then
+    line2_segments+=("\033[90mTask:${done_count}/${total}${RST}")
+  fi
+fi
+
+# Emit line 2, indented with Braille Pattern Blank (U+2800). These render
+# as whitespace but are not classified as spaces, so they survive the
+# status line's leading-whitespace trim.
+brblank=$'\xe2\xa0\x80'
+indent="${brblank}${brblank}${brblank}${brblank}"
+inner=""
+for seg in "${line2_segments[@]}"; do
+  [ -n "$inner" ] && inner="$inner | "
+  inner="$inner$seg"
+done
+parts="$parts\n${indent}| $inner"
 
 printf "%b" "$parts"
