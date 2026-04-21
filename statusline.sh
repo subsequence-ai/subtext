@@ -5,7 +5,7 @@ input=$(cat)
 # Extract all fields in one jq call
 eval "$(echo "$input" | jq -r '
   @sh "model=\(.model.display_name // "")",
-  @sh "used_pct=\(.context_window.used_percentage // "")",
+  @sh "transcript_path=\(.transcript_path // "")",
   @sh "cost=\(.cost.total_cost_usd // "")",
   @sh "session_id=\(.session_id // "")",
   @sh "cwd=\(.workspace.current_dir // "")",
@@ -29,13 +29,13 @@ case "$model" in
   *Haiku*4.5*)      model="Haiku 4.5" ;;
 esac
 
-# Context color (aggressive thresholds — never want to exceed 20%)
-# green 0-9, yellow 10-13, orange 14-16, red 17+
-color_for_ctx() {
-  local pct=$1
-  if [ "$pct" -ge 17 ] 2>/dev/null; then printf '\033[91m'
-  elif [ "$pct" -ge 14 ] 2>/dev/null; then printf '\033[38;5;208m'
-  elif [ "$pct" -ge 10 ] 2>/dev/null; then printf '\033[33m'
+# Token color (absolute thresholds — tied to context degradation, not window size)
+# green <90k, yellow 90-129k, orange 130-159k, red 160k+
+color_for_tokens() {
+  local t=$1
+  if [ "$t" -ge 160000 ] 2>/dev/null; then printf '\033[91m'
+  elif [ "$t" -ge 130000 ] 2>/dev/null; then printf '\033[38;5;208m'
+  elif [ "$t" -ge 90000 ] 2>/dev/null; then printf '\033[33m'
   else printf '\033[32m'; fi
 }
 
@@ -89,12 +89,28 @@ rate_limit_display() {
   fi
 }
 
-# Context
-if [ -n "$used_pct" ]; then
-  used_int=$(printf '%.0f' "$used_pct")
-  ctx_display="\033[1m$(color_for_ctx "$used_int")CTX:${used_int}%${RST}"
+# Token usage (from transcript — the statusline JSON's used_percentage is unreliable)
+tokens=""
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+  tokens=$(tail -c 200000 "$transcript_path" 2>/dev/null \
+    | grep '"type":"assistant"' | tail -1 \
+    | jq -r '.message.usage as $u |
+        if $u then (($u.input_tokens // 0) + ($u.cache_creation_input_tokens // 0) + ($u.cache_read_input_tokens // 0)) | tostring
+        else empty end' 2>/dev/null)
+fi
+
+if [ -n "$tokens" ] && [ "$tokens" -gt 0 ] 2>/dev/null; then
+  if [ "$tokens" -ge 1000000 ]; then
+    tenths=$(( tokens / 100000 ))
+    token_label="$(( tenths / 10 )).$(( tenths % 10 ))M"
+  elif [ "$tokens" -ge 1000 ]; then
+    token_label="$(( tokens / 1000 ))k"
+  else
+    token_label="$tokens"
+  fi
+  token_display="\033[1m$(color_for_tokens "$tokens")Tokens:${token_label}${RST}"
 else
-  ctx_display="\033[1mCTX:${RST}"
+  token_display="\033[1mTokens:${RST}"
 fi
 
 # Rate limits
@@ -109,9 +125,9 @@ else
   limit_7d="7d:"
 fi
 
-# Assemble: logo | ctx | 5h | 7d | model | price
+# Assemble line 1: logo | tokens | 5h | 7d | model | effort
 parts="\033[38;2;163;189;168m<𝕊>${RST}"
-parts="$parts | $ctx_display"
+parts="$parts | $token_display"
 parts="$parts | $limit_5h"
 parts="$parts | $limit_7d"
 parts="$parts | \033[90m${model:-}${RST}"
@@ -120,7 +136,7 @@ parts="$parts | \033[90m${model:-}${RST}"
 # Active agents
 if [ -f "$TRACK_FILE" ]; then
   agent_info=$(jq -r --arg sid "$session_id" '
-    [to_entries[] | select(.value.session == $sid or ($sid == "")) | .value.type] |
+    [to_entries[] | select(.value.session == $sid) | .value.type] |
     if length > 0 then "\(length):\(join(", "))" else empty end
   ' "$TRACK_FILE" 2>/dev/null)
   [ -n "$agent_info" ] && parts="$parts | agents(${agent_info%%:*}): ${agent_info#*:}"
@@ -134,27 +150,23 @@ if [ -n "$cwd" ] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
   branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
   if [ -n "$branch" ]; then
     dirty=""
-    [ -n "$(git -C "$cwd" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] && dirty="*"
+    [ -n "$(git -C "$cwd" status --porcelain --untracked-files=no 2>/dev/null)" ] && dirty="*"
     line2_segments+=("\033[90m${branch}${dirty}${RST}")
   fi
 fi
 
-# Session timer (duration since session file was created)
-if [ -n "$session_id" ] && [ -n "$cwd" ]; then
-  encoded=$(printf '%s' "$cwd" | tr '/_.' '---')
-  session_file="$HOME/.claude/projects/${encoded}/${session_id}.jsonl"
-  if [ -f "$session_file" ]; then
-    birth=$(stat -f %B "$session_file" 2>/dev/null)
-    if [ -n "$birth" ] && [ "$birth" -gt 0 ] 2>/dev/null; then
-      elapsed=$(( now_epoch - birth ))
-      [ "$elapsed" -lt 0 ] && elapsed=0
-      if [ "$elapsed" -lt 3600 ]; then
-        timer="$(( elapsed / 60 ))m"
-      else
-        timer="$(( elapsed / 3600 ))h$(( (elapsed % 3600) / 60 ))m"
-      fi
-      line2_segments+=("\033[90m${timer}${RST}")
+# Session timer (duration since session transcript was created)
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+  birth=$(stat -f %B "$transcript_path" 2>/dev/null)
+  if [ -n "$birth" ] && [ "$birth" -gt 0 ] 2>/dev/null; then
+    elapsed=$(( now_epoch - birth ))
+    [ "$elapsed" -lt 0 ] && elapsed=0
+    if [ "$elapsed" -lt 3600 ]; then
+      timer="$(( elapsed / 60 ))m"
+    else
+      timer="$(( elapsed / 3600 ))h$(( (elapsed % 3600) / 60 ))m"
     fi
+    line2_segments+=("\033[90m${timer}${RST}")
   fi
 fi
 
